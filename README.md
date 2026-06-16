@@ -1,4 +1,4 @@
-# UltimatteKey — Remote control for the Blackmagic Smart Remote 4
+# Ultimatte — Remote control for the Blackmagic Smart Remote 4
 
 Trigger **Ultimatte unit switching** in the Blackmagic **Smart Remote** software over **HTTP**,
 exactly as if someone had pressed a physical **UNIT** button on the panel — while the physical
@@ -163,6 +163,35 @@ so **no window ever appears**. It also opens the firewall port.
 - Change the port and apply immediately (no reboot): `.\Install-StartupTask.ps1 -HttpPort 9000 -Restart`
 - Uninstall (task + firewall rule): `.\Install-StartupTask.ps1 -Remove`
 - Progress/diagnostics are written to `bridge-boot.log` next to the scripts.
+
+### Uninstall / full cleanup
+Undo the steps above in reverse order:
+
+1. **Remove our auto-start task and firewall rule** (admin):
+
+```powershell
+.\Install-StartupTask.ps1 -Remove
+```
+
+2. **Remove the com0com virtual ports.** Launch the com0com setup console
+   (`setupc.exe`, or the "Setup Command Prompt" shortcut installed with com0com) and run the
+   uninstall command:
+
+```
+uninstall
+```
+
+   `uninstall` removes **all** com0com pairs. To delete only the pairs we added, remove them by
+   index instead (use `list` first to see the numbers), e.g.:
+
+```
+list
+remove 0
+remove 1
+```
+
+3. **Restore the physical COM numbers** in Device Manager: rename the panel back
+   **COM5 → COM1** and the other port **COM6 → COM2** (Properties → Port Settings → Advanced).
 
 ---
 
