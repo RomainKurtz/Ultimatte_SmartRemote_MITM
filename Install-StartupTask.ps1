@@ -14,6 +14,9 @@
 .PARAMETER TaskName   Nom de la tache. Defaut 'UltimatteKeyBridge'.
 .PARAMETER StartDelay Delai apres le boot avant de lancer (format ISO8601). Defaut 'PT30S' (30 s).
 .PARAMETER HttpPort   Port HTTP transmis au lanceur. Defaut 8088.
+.PARAMETER NotifyUrl       URL de base notifiee (POST) sur changement d'unite MANUEL. Ex Companion :
+                           'http://127.0.0.1:8000'. Requiert aussi -NotifyVariable.
+.PARAMETER NotifyVariable  Nom de la variable personnalisee Companion a mettre a jour (ex 'ultimatte_unit').
 .PARAMETER Restart    Apres l'enregistrement : ARRETE l'instance en cours puis la REDEMARRE,
                       afin d'APPLIQUER TOUT DE SUITE le nouveau port (sans rebooter).
 .PARAMETER Remove     Supprime la tache au lieu de la creer.
@@ -27,14 +30,20 @@
     .\Install-StartupTask.ps1 -HttpPort 9000 -Restart
 
 .EXAMPLE
+    # Notifier Companion (variable 'ultimatte_unit') sur appui MANUEL, et appliquer tout de suite :
+    .\Install-StartupTask.ps1 -NotifyUrl 'http://127.0.0.1:8000' -NotifyVariable 'ultimatte_unit' -Restart
+
+.EXAMPLE
     # Desinstaller :
     .\Install-StartupTask.ps1 -Remove
 #>
 [CmdletBinding()]
 param(
     [string]$TaskName = 'UltimatteKeyBridge',
-    [string]$StartDelay = 'PT30S',
+    [string]$StartDelay = 'PT10S',
     [int]$HttpPort = 8088,
+    [string]$NotifyUrl,
+    [string]$NotifyVariable,
     [switch]$Restart,
     [switch]$Remove
 )
@@ -53,7 +62,8 @@ if ($Remove) {
     if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
         Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
         Write-Host "Tache '$TaskName' supprimee." -ForegroundColor Green
-    } else {
+    }
+    else {
         Write-Host "Tache '$TaskName' inexistante." -ForegroundColor Yellow
     }
     if (Get-NetFirewallRule -DisplayName $fwName -ErrorAction SilentlyContinue) {
@@ -77,6 +87,9 @@ if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
 }
 
 $argument = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}" -HttpPort {1}' -f $launcher, $HttpPort
+if ($NotifyUrl -and $NotifyVariable) {
+    $argument += ' -NotifyUrl "{0}" -NotifyVariable "{1}"' -f $NotifyUrl, $NotifyVariable
+}
 
 $action = New-ScheduledTaskAction -Execute "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" -Argument $argument -WorkingDirectory $here
 
@@ -116,7 +129,8 @@ if ($Restart) {
     Start-Sleep -Seconds 1
     Start-ScheduledTask -TaskName $TaskName
     Write-Host "Tache redemarree sur le port $HttpPort." -ForegroundColor Green
-} else {
+}
+else {
     Write-Host "`nPour APPLIQUER MAINTENANT (sans rebooter) :" -ForegroundColor Cyan
     Write-Host ("  .\Install-StartupTask.ps1 -HttpPort {0} -Restart" -f $HttpPort) -ForegroundColor Gray
     Write-Host "  (ou) Stop-ScheduledTask -TaskName '$TaskName' ; Start-ScheduledTask -TaskName '$TaskName'" -ForegroundColor Gray

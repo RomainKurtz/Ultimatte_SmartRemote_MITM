@@ -12,6 +12,8 @@
 .PARAMETER AppPort    Port com0com moniteur/injection (partenaire de COM2 cote hub4com). Defaut COM2.
 .PARAMETER PanelPort  Port PHYSIQUE du panneau. Defaut COM5.
 .PARAMETER HttpPort   Port du serveur HTTP d'injection. Defaut 8088.
+.PARAMETER NotifyUrl       URL de base a notifier (POST) sur changement d'unite MANUEL. Ex : 'http://127.0.0.1:8000'.
+.PARAMETER NotifyVariable  Nom de la variable personnalisee Companion a mettre a jour.
 .PARAMETER WaitPortSeconds  Attend (max N s) que le port physique du panneau soit enumere. Defaut 90.
 
 .EXAMPLE
@@ -23,7 +25,9 @@ param(
     [string]$AppPort = 'COM2',
     [string]$PanelPort = 'COM5',
     [int]$HttpPort = 8088,
-    [int]$WaitPortSeconds = 90
+    [string]$NotifyUrl,
+    [string]$NotifyVariable,
+    [int]$WaitPortSeconds = 10
 )
 
 $ErrorActionPreference = 'Stop'
@@ -61,7 +65,8 @@ while ((Get-Date) -lt $deadline) {
 }
 if (-not $found) {
     Log ("AVERTISSEMENT : {0} non vu apres {1}s. On tente quand meme." -f $PanelPort, $WaitPortSeconds)
-} else {
+}
+else {
     Log ("{0} present." -f $PanelPort)
 }
 
@@ -81,7 +86,8 @@ Log ("Lancement hub4com : {0} {1}" -f $Hub4com, ($hubArgs -join ' '))
 try {
     $hub = Start-Process -FilePath $Hub4com -ArgumentList $hubArgs -WindowStyle Hidden -PassThru
     Log ("hub4com demarre (PID {0})." -f $hub.Id)
-} catch {
+}
+catch {
     Log ("ERREUR au lancement de hub4com : {0}" -f $_.Exception.Message)
     exit 1
 }
@@ -94,11 +100,15 @@ Start-Sleep -Seconds 3
 $bridge = Join-Path $here 'Switch-Bridge.ps1'
 if (-not (Test-Path $bridge)) { Log ("ERREUR : {0} introuvable." -f $bridge); exit 1 }
 
+$bridgeArgs = @{ InjectOnly = $true; AppPort = $AppPort; PanelPort = $PanelPort; HttpPort = $HttpPort; LogFile = $log }
+if ($NotifyUrl -and $NotifyVariable) { $bridgeArgs.NotifyUrl = $NotifyUrl; $bridgeArgs.NotifyVariable = $NotifyVariable }
+
 while ($true) {
-    Log ("Demarrage de Switch-Bridge.ps1 (InjectOnly) : AppPort={0} PanelPort={1} HttpPort={2}" -f $AppPort, $PanelPort, $HttpPort)
+    Log ("Demarrage de Switch-Bridge.ps1 (InjectOnly) : AppPort={0} PanelPort={1} HttpPort={2} Notify={3}" -f $AppPort, $PanelPort, $HttpPort, ($(if ($NotifyUrl) { "$NotifyUrl -> $NotifyVariable" } else { 'off' })))
     try {
-        & $bridge -InjectOnly -AppPort $AppPort -PanelPort $PanelPort -HttpPort $HttpPort -LogFile $log
-    } catch {
+        & $bridge @bridgeArgs
+    }
+    catch {
         Log ("Switch-Bridge a leve une exception : {0}" -f $_.Exception.Message)
     }
     Log "Switch-Bridge s'est arrete. Relance dans 5 s."

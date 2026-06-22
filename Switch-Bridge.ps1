@@ -35,6 +35,12 @@
 .PARAMETER HttpPrefix  (Avance) Prefixe d'ecoute HTTP complet, ex 'http://+:9000/'. S'il est
                        fourni, il a la priorite sur -HttpPort. Sinon deduit de -HttpPort.
                        Si acces refuse (pas admin), bascule auto sur localhost.
+.PARAMETER NotifyUrl   URL de base a notifier quand l'utilisateur change d'unite MANUELLEMENT
+                       (appui physique). Ex Companion : 'http://127.0.0.1:8000'. Requiert aussi
+                       -NotifyVariable. Le pont envoie alors un POST a :
+                         <NotifyUrl>/api/custom-variable/<NotifyVariable>/value
+                       avec le NUMERO d'unite (1-8) dans le corps de la requete.
+.PARAMETER NotifyVariable  Nom de la variable personnalisee Companion a mettre a jour.
 .PARAMETER WithRelease Apres chaque injection, envoie aussi 'Switch=0;' (relachement).
 .PARAMETER ShowAll     Affiche TOUT le trafic (sinon : seulement boutons + injections).
 .PARAMETER InjectOnly  N'ouvre PAS le panneau : se contente d'ecrire les injections vers
@@ -61,6 +67,11 @@
     # Puis (logiciel lance) :
     .\Switch-Bridge.ps1 -InjectOnly -AppPort COM2
     #   -> affiche les appuis (BOUTON, vert) comme Read-Serial, et /unit/3 injecte vers le logiciel.
+
+.EXAMPLE
+    # En plus : prevenir Companion (variable perso 'ultimatte_unit') des changements MANUELS :
+    .\Switch-Bridge.ps1 -InjectOnly -AppPort COM2 -NotifyUrl 'http://127.0.0.1:8000' -NotifyVariable 'ultimatte_unit'
+    #   -> appui physique UNIT 3 => POST http://127.0.0.1:8000/api/custom-variable/ultimatte_unit/value  (corps : 3)
 #>
 [CmdletBinding()]
 param(
@@ -75,6 +86,8 @@ param(
     [switch]$RtsOff,
     [int]$HttpPort = 8088,
     [string]$HttpPrefix,
+    [string]$NotifyUrl,
+    [string]$NotifyVariable,
     [string]$LogFile,
     [switch]$WithRelease,
     [switch]$ShowAll,
@@ -96,6 +109,34 @@ Write-Log ("Demarrage : AppPort={0} PanelPort={1} HttpPrefix={2} InjectOnly={3}"
 # NB : table de hachage NORMALE (pas [ordered]) -> $map[$n] indexe par CLE, pas par position.
 $UnitMap = @{
     1 = 4; 2 = 32; 3 = 256; 4 = 2048; 5 = 8; 6 = 64; 7 = 512; 8 = 4096
+}
+
+# Carte inverse masque -> numero d'unite (pour detecter les appuis PHYSIQUES dans le flux).
+$MaskToUnit = @{}
+foreach ($k in $UnitMap.Keys) { $MaskToUnit[[int]$UnitMap[$k]] = [int]$k }
+
+# Notification sortante (POST vers Companion) sur changement d'unite MANUEL (appui physique).
+$NotifyEnabled = [bool]($NotifyUrl -and $NotifyVariable)
+$notifyQueue = [System.Collections.Queue]::Synchronized((New-Object System.Collections.Queue))
+$script:lastInjectAt = [DateTime]::MinValue
+
+# Extrait le 1er numero d'unite reconnu d'une trame ASCII contenant 'Switch=<masque>;'.
+function Get-UnitFromAscii([string]$asc) {
+    foreach ($mm in [regex]::Matches($asc, 'Switch=(\d+);')) {
+        $val = [int]$mm.Groups[1].Value
+        if ($MaskToUnit.Contains($val)) { return $MaskToUnit[$val] }
+    }
+    return $null
+}
+
+# Met en file une notification si la trame est un appui physique reconnu (et pas l'echo d'une injection).
+function Send-ButtonNotify([string]$asc) {
+    if (-not $NotifyEnabled) { return }
+    $u = Get-UnitFromAscii $asc
+    if ($null -eq $u) { return }
+    if (((Get-Date) - $script:lastInjectAt).TotalMilliseconds -lt 400) { return }  # anti-boucle / anti-echo
+    $notifyQueue.Enqueue([int]$u)
+    Write-Log ("NOTIFY file d'attente : unit={0}" -f $u)
 }
 
 if ($List) {
@@ -266,6 +307,36 @@ $ps.Runspace = $rs
 $null = $ps.AddScript($httpScript.ToString()).AddArgument($HttpPrefix).AddArgument($injectQueue).AddArgument($state).AddArgument($UnitMap)
 $httpHandle = $ps.BeginInvoke()
 
+# --- Runspace de NOTIFICATION sortante (POST Companion) : envoi non bloquant via une file ---
+$notifyState = [hashtable]::Synchronized(@{ Running = $true })
+$notifyPs = $null; $notifyHandle = $null; $notifyRs = $null
+if ($NotifyEnabled) {
+    $notifyScript = {
+        param($baseUrl, $varName, $queue, $state, $logFile)
+        function NLog([string]$m) {
+            if ($logFile) { try { Add-Content -Path $logFile -Value ("{0}  [notify] {1}" -f (Get-Date).ToString('yyyy-MM-dd HH:mm:ss'), $m) -Encoding UTF8 } catch {} }
+        }
+        $uri = ("{0}/api/custom-variable/{1}/value" -f $baseUrl.TrimEnd('/'), $varName)
+        while ($state.Running) {
+            if ($queue.Count -gt 0) {
+                $val = $queue.Dequeue()
+                try {
+                    Invoke-RestMethod -Method Post -Uri $uri -Body ([string]$val) -ContentType 'text/plain' -TimeoutSec 5 | Out-Null
+                    NLog ("POST {0} corps={1} OK" -f $uri, $val)
+                } catch {
+                    NLog ("POST {0} corps={1} ECHEC : {2}" -f $uri, $val, $_.Exception.Message)
+                }
+            } else {
+                Start-Sleep -Milliseconds 20
+            }
+        }
+    }
+    $notifyRs = [runspacefactory]::CreateRunspace(); $notifyRs.Open()
+    $notifyPs = [powershell]::Create(); $notifyPs.Runspace = $notifyRs
+    $null = $notifyPs.AddScript($notifyScript.ToString()).AddArgument($NotifyUrl).AddArgument($NotifyVariable).AddArgument($notifyQueue).AddArgument($notifyState).AddArgument($LogFile)
+    $notifyHandle = $notifyPs.BeginInvoke()
+}
+
 # Attendre que le serveur HTTP demarre (max ~3 s)
 $deadline = (Get-Date).AddSeconds(3)
 while (-not $state.UsedPrefix -and -not $state.LastError -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 100 }
@@ -287,6 +358,11 @@ if ($state.UsedPrefix) {
     Write-Host ("ATTENTION : serveur HTTP non demarre. {0}" -f $state.LastError) -ForegroundColor Red
     Write-Log ("ERREUR : serveur HTTP non demarre. {0}" -f $state.LastError)
 }
+if ($NotifyEnabled) {
+    $notifyUri = ("{0}/api/custom-variable/{1}/value" -f $NotifyUrl.TrimEnd('/'), $NotifyVariable)
+    Write-Host ("Notification appui MANUEL -> POST {0} (corps = numero d'unite)." -f $notifyUri) -ForegroundColor Cyan
+    Write-Log ("Notification activee : POST {0}" -f $notifyUri)
+}
 Write-Host "Boutons physiques (vert) et injections (magenta) ci-dessous. Ctrl+C pour arreter.`n" -ForegroundColor DarkGray
 
 # ---------------------------------------------------------------------------
@@ -303,6 +379,7 @@ try {
             try {
                 $app.Write($bytes, 0, $bytes.Length)
                 if ($WithRelease) { $rel = [System.Text.Encoding]::ASCII.GetBytes('Switch=0;'); $app.Write($rel, 0, $rel.Length) }
+                $script:lastInjectAt = Get-Date   # anti-boucle : ne pas notifier l'echo de notre propre injection
                 Write-Host ("{0}  INJECT >>  {1}  |{2}|{3}" -f (Get-Date).ToString('HH:mm:ss.fff'), $item.Label, $item.Cmd, ($(if ($WithRelease) { 'Switch=0;' } else { '' }))) -ForegroundColor Magenta
                 Write-Log ("INJECT {0} -> {1}" -f $item.Label, $item.Cmd)
             } catch {
@@ -322,7 +399,7 @@ try {
             if ((-not $InjectOnly) -and $panel) { try { $panel.Write($buf, 0, $r) } catch {} }
             $asc = Format-Ascii $buf $r
             if ($InjectOnly) {
-                if ($asc -match 'Switch=') { Write-Host ("{0}  BOUTON    |{1}|" -f (Get-Date).ToString('HH:mm:ss.fff'), $asc) -ForegroundColor Green }
+                if ($asc -match 'Switch=') { Write-Host ("{0}  BOUTON    |{1}|" -f (Get-Date).ToString('HH:mm:ss.fff'), $asc) -ForegroundColor Green; Send-ButtonNotify $asc }
                 elseif ($ShowAll) { Write-Host ("{0}  MONITEUR  |{1}|" -f (Get-Date).ToString('HH:mm:ss.fff'), $asc) -ForegroundColor DarkGray }
             }
             elseif ($ShowAll) { Write-Host ("{0}  PC->PAN   |{1}|" -f (Get-Date).ToString('HH:mm:ss.fff'), $asc) -ForegroundColor DarkGray }
@@ -336,6 +413,7 @@ try {
             $asc = Format-Ascii $buf $r
             if ($ShowAll) { Write-Host ("{0}  PAN->PC   |{1}|" -f (Get-Date).ToString('HH:mm:ss.fff'), $asc) -ForegroundColor Green }
             elseif ($asc -match 'Switch=') { Write-Host ("{0}  BOUTON    |{1}|" -f (Get-Date).ToString('HH:mm:ss.fff'), $asc) -ForegroundColor Green }
+            if ($asc -match 'Switch=') { Send-ButtonNotify $asc }
             $did = $true
         }
 
@@ -344,10 +422,12 @@ try {
 }
 finally {
     $state.Running = $false
+    $notifyState.Running = $false
     try { if ($state.Listener) { $state.Listener.Stop(); $state.Listener.Close() } } catch {}
     try { $ps.Stop() } catch {}
     try { $ps.EndInvoke($httpHandle) } catch {}
     try { $rs.Close() } catch {}
+    if ($notifyPs) { try { $notifyPs.Stop() } catch {}; try { $notifyPs.EndInvoke($notifyHandle) } catch {}; try { $notifyRs.Close() } catch {} }
     if ($panel) { if ($panel.IsOpen) { $panel.Close() }; $panel.Dispose() }
     if ($app.IsOpen) { $app.Close() }; $app.Dispose()
     Write-Host "`nArrete." -ForegroundColor Cyan

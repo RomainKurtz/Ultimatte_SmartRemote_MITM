@@ -139,6 +139,8 @@ With the Smart Remote software running:
 - Physical button presses appear in green (`BOUTON |Switch=256;|`), like a serial monitor.
 - The HTTP server listens on the chosen port (default 8088).
 - Add `-ShowAll` to see all traffic (including `Poll=0;`), `-LogFile <path>` to log to a file.
+- To notify Companion when the user presses a button **manually**, add
+  `-NotifyUrl 'http://127.0.0.1:8000' -NotifyVariable 'ultimatte_unit'` (see section 5).
 
 ### Step 5 — Open the Windows Firewall (for access from other machines)
 Without this, the API answers on `localhost` but **not** from other computers on the LAN.
@@ -161,6 +163,8 @@ then **Switch-Bridge** in inject mode — running as **SYSTEM**, "whether a user
 so **no window ever appears**. It also opens the firewall port.
 
 - Change the port and apply immediately (no reboot): `.\Install-StartupTask.ps1 -HttpPort 9000 -Restart`
+- Enable Companion notifications on manual changes (see section 5):
+  `.\Install-StartupTask.ps1 -NotifyUrl 'http://127.0.0.1:8000' -NotifyVariable 'ultimatte_unit' -Restart`
 - Uninstall (task + firewall rule): `.\Install-StartupTask.ps1 -Remove`
 - Progress/diagnostics are written to `bridge-boot.log` next to the scripts.
 
@@ -217,11 +221,45 @@ Invoke-RestMethod "http://localhost:8088/send?cmd=Switch=256;"
 
 ---
 
-## 5. Files in this repository
+## 5. Notifying Companion on manual unit changes (outbound POST)
+
+The bridge can also work the other way around: when someone presses a UNIT button **physically on
+the panel**, it detects the `Switch=<mask>;` event, maps it to the unit number (1–8) and sends an
+HTTP **POST** to a URL of your choice. This is meant to drive a
+[Bitfocus Companion](https://bitfocus.io/companion) **custom variable**.
+
+Enable it with two parameters (on the bridge, the launcher, or the installer):
+
+```powershell
+.\Switch-Bridge.ps1 -InjectOnly -AppPort COM2 `
+  -NotifyUrl 'http://127.0.0.1:8000' -NotifyVariable 'ultimatte_unit'
+```
+
+On each **manual** press, the bridge calls Companion's "Change custom variable value" endpoint:
+
+```
+POST <NotifyUrl>/api/custom-variable/<NotifyVariable>/value
+Body: <unit number>          # e.g. 3
+```
+
+So a physical press on **UNIT 3** sends `POST http://127.0.0.1:8000/api/custom-variable/ultimatte_unit/value`
+with body `3`, and Companion's custom variable `ultimatte_unit` becomes `3`.
+
+Notes:
+- Only **manual** presses trigger a POST. Injections coming from our own HTTP API are *not* echoed
+  back (a 400 ms guard also prevents any feedback loop).
+- POSTs are sent from a background thread, so a slow/unreachable Companion never blocks the panel.
+- Each POST (success/failure) is written to the log file when `-LogFile` is set.
+- In Companion, create the custom variable first (Variables → Custom Variables → `ultimatte_unit`)
+  and make sure its HTTP API is enabled (Settings → HTTP, default port 8000).
+
+---
+
+## 6. Files in this repository
 
 | File                       | Purpose                                                                       |
 |----------------------------|-------------------------------------------------------------------------------|
-| `Switch-Bridge.ps1`        | **Main script.** MITM monitor + HTTP injection API (`-InjectOnly` mode).      |
+| `Switch-Bridge.ps1`        | **Main script.** MITM monitor + HTTP injection API + outbound Companion notify (`-InjectOnly`). |
 | `Start-Bridge-AtBoot.ps1`  | Boot launcher: starts hub4com hidden, then the bridge; logs to `bridge-boot.log`. |
 | `Install-StartupTask.ps1`  | Registers/removes the hidden auto-start Scheduled Task and the firewall rule. |
 | `Read-Serial.ps1`          | Full-duplex serial monitor used to reverse-engineer the protocol (diagnostic).|
@@ -232,7 +270,7 @@ Invoke-RestMethod "http://localhost:8088/send?cmd=Switch=256;"
 
 ---
 
-## 6. Troubleshooting
+## 7. Troubleshooting
 
 - **Works on localhost but not from the network** → open the firewall port (Step 5) **and** make
   sure the listener binds to all interfaces. Check the log line `HTTP en ecoute sur : http://+:<port>/`
@@ -248,3 +286,7 @@ Invoke-RestMethod "http://localhost:8088/send?cmd=Switch=256;"
   running, and the serial parameters match (115200/Odd/8/1, XON/XOFF).
 - **`Read-Serial.ps1 -Port COM2`** is the reference tool to confirm you can see the panel↔software
   traffic while hub4com is running.
+- **Companion variable not updating** → check the `[notify] POST ... OK/ECHEC` lines in the log,
+  confirm Companion's HTTP API is enabled (Settings → HTTP) and the custom variable exists, and that
+  both `-NotifyUrl` and `-NotifyVariable` were passed (a `BOUTON` line with no `NOTIFY` line means the
+  feature is disabled).
