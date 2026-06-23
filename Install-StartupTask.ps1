@@ -40,7 +40,7 @@
 [CmdletBinding()]
 param(
     [string]$TaskName = 'UltimatteKeyBridge',
-    [string]$StartDelay = 'PT10S',
+    [string]$StartDelay = 'PT20S',
     [int]$HttpPort = 8088,
     [string]$NotifyUrl,
     [string]$NotifyVariable,
